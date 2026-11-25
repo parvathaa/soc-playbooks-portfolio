@@ -2,8 +2,8 @@
 
 **Scope:** Microsoft 365 / Entra ID and Google Workspace accounts used to send malicious mail, access data, or persist.
 **Audience:** SOC analysts (L1 to L2) and incident leads.
-**Basis:** Public reporting on the October 2026 Nikkei incident. This is an analysis and playbook built from public sources. It is not a record of a response I performed.
-**Sources current as of:** 6 October 2026. Details may change as the investigation continues.
+**Basis:** Public reporting on three Nikkei incidents disclosed in October 2026. This is an analysis and playbook built from public sources. It is not a record of a response I performed.
+**Sources checked on:** 25 November 2026. The latest report used is from 19 October 2026, and details may have changed since.
 
 ---
 
@@ -13,21 +13,29 @@
 
 | Date (2026) | Event | Confidence |
 |---|---|---|
-| Late July | Unauthorized access to Nikkei's Google Workspace cloud accounts begins | Reported by Nikkei |
+| Late July | Unauthorized access to one or more Nikkei Google Workspace accounts begins (reports differ on how many) | Reported by Nikkei |
 | Early August | Nikkei learns of it **after Google notifies the company** | Reported |
-| 30 September | Attackers use hijacked Microsoft 365 accounts to send about 9,000 emails with links to malicious sites, to staff and to external contacts who had corresponded with employees | Reported |
-| 4 October | Nikkei discloses both incidents and reports them to Japan's Personal Information Protection Commission | Reported |
+| 30 September | Attackers use one or more hijacked Microsoft 365 accounts (reports differ) to send about 9,000 emails with links to malicious sites, to staff and to external contacts, including interviewees | Reported |
+| 4 October | Nikkei discloses both incidents, and reports them to Japan's Personal Information Protection Commission | Reported |
+| 7 October | Separate incident: stolen credentials are used to enter a Nikkei development system, exposing about 1.83 million cloud-stored records | Reported |
+| 11 October | Nikkei notifies the Personal Information Protection Commission of the third incident; the abused credentials are revoked | Reported |
 
-**Reported impact:** Names, email addresses, and the content of some messages. Nikkei says possible exposure of 1,646 employees and business partners via Google Workspace, and no sign of leaked reader or source information. It says it changed affected passwords, detected no further unauthorized logins, and contacted recipients individually to ask them to delete the emails.
+**Reported impact:**
 
-**Not reported (treat as unknown):** the initial access method, whether the two incidents are linked, the attacker identity, and the full scope.
+- **Google Workspace:** names and email addresses of 1,646 people, including employees and business partners, may have been exposed. Nikkei said this did not include reader or source information.
+- **Microsoft 365:** recipients' names, email addresses, and some message content may have been exposed. Recipients included interviewees.
+- **Development system:** about 1.83 million records. Roughly 150,000 contained at least one identifier, such as a name, email address, or phone number. As of 16 October, Nikkei had no evidence of misuse.
+
+Nikkei says it changed the affected account passwords in both account incidents. For Microsoft 365, it reported no further unauthorized logins and contacted recipients individually to ask them to delete the emails.
+
+**Not reported (treat as unknown):** how the accounts and the development system credentials were first compromised, whether the incidents are linked, the attacker identity, and the full scope.
 
 ### Why it is a useful case
 
 1. **Trusted-sender abuse.** Mail came from genuine accounts, so sender reputation and "external sender" banners did not help recipients.
 2. **Third-party notification as detection.** The Google Workspace access was found because Google told Nikkei. That points to a gap in internal detection.
 3. **External blast radius.** Recipients included partners and past correspondents, so response goes beyond the company's own users.
-4. **Two platforms, two incidents.** Containment and investigation had to cover both Microsoft 365 and Google Workspace.
+4. **Several systems, one theme.** Containment and investigation had to cover Microsoft 365, Google Workspace, and a development system. All three involved compromised accounts or credentials, but no link between them has been reported.
 
 ### Hypotheses to test (not in the reporting)
 
@@ -116,11 +124,11 @@ OfficeActivity
 | project TimeGenerated, UserId, Operation, ClientIP, Parameters
 ```
 
-**Outbound mail spikes with URLs**
+**Outbound and internal mail spikes with URLs**
 ```kql
 EmailEvents
 | where Timestamp > ago(7d)
-| where EmailDirection == "Outbound"
+| where EmailDirection in ("Outbound", "Intra-org")
 | summarize Sent = count(),
             UniqueRecipients = dcount(RecipientEmailAddress),
             WithUrls = countif(UrlCount > 0)
@@ -133,7 +141,8 @@ EmailEvents
 ```kql
 AuditLogs
 | where TimeGenerated > ago(14d)
-| where OperationName in ("Consent to application", "Add OAuth2PermissionGrant")
+| where OperationName in ("Consent to application", "Add delegated permission grant",
+                          "Add app role assignment to service principal")
 | project TimeGenerated, OperationName, InitiatedBy, TargetResources
 ```
 
@@ -141,12 +150,12 @@ AuditLogs
 
 ### 2.5 Phase 2: Containment (do together, in this order)
 
-1. **Revoke all active sessions and refresh tokens** (Entra: revoke sessions; Google: sign user out and reset sign-in cookies). A password reset alone does not end a stolen session.
-2. **Reset the password** and require re-registration of MFA. Remove unknown MFA methods.
-3. **Block the attacker IPs / sessions** via conditional access where appropriate.
-4. **Remove attacker persistence:** malicious inbox and forwarding rules, delegates, unknown OAuth app grants, app passwords.
-5. **Stop the spread:** search for and purge the malicious messages from all mailboxes (Defender/Purview content search and purge; Google Workspace email log search and delete). Block the URLs and domains at the proxy and mail gateway.
-6. **Preserve evidence** before changes where possible: export sign-in, audit, and mail trace logs; screenshot rules and grants.
+1. **Preserve evidence first where possible:** export sign-in, audit, and mail trace logs; screenshot rules and grants. Do not delay urgent containment for this.
+2. **Revoke all active sessions and refresh tokens** (Entra: revoke sessions; Google: sign user out and reset sign-in cookies). A password reset alone does not end a stolen session.
+3. **Reset the password** and require re-registration of MFA. Remove unknown MFA methods.
+4. **Block the attacker IPs / sessions** via conditional access where appropriate.
+5. **Remove attacker persistence:** malicious inbox and forwarding rules, delegates, unknown OAuth app grants, app passwords.
+6. **Stop the spread:** search for and purge the malicious messages from all mailboxes (Defender/Purview content search and purge; Google Workspace email log search and delete). Block the URLs and domains at the proxy and mail gateway.
 
 ### 2.6 Phase 3: Scoping and investigation
 
@@ -156,7 +165,7 @@ AuditLogs
 - [ ] Who received malicious mail? Split internal and external; identify who clicked
 - [ ] Did any recipient enter credentials or run a download? Treat those accounts and hosts as suspect
 - [ ] Is there lateral movement (the attacker emailing from one account to compromise another)?
-- [ ] Is there evidence of data access in **other platforms** (like the second platform in the Nikkei case)?
+- [ ] Is there evidence of data access in **other platforms** (like the separate incidents in the Nikkei case)?
 
 ### 2.7 Phase 4: Eradication and recovery
 
@@ -201,9 +210,10 @@ AuditLogs
 | Initial Access | T1078.004 Valid Accounts: Cloud Accounts | Hijacked M365 and Workspace accounts |
 | Initial Access / Credential Access | T1566.002 Spearphishing Link; T1621 MFA Request Generation | Possible entry hypotheses |
 | Credential Access | T1528 Steal Application Access Token | Token or OAuth theft hypothesis |
-| Defense Evasion / Lateral Movement | T1550.004 Use Alternate Authentication Material: Web Session Cookie | Session theft hypothesis |
-| Persistence | T1114.003 Email Forwarding Rule; T1098 Account Manipulation | Rules, delegates, new MFA methods |
-| Lateral Movement / Initial Access | T1534 Internal Spearphishing | Mass mail from trusted accounts |
+| Lateral Movement | T1550.004 Use Alternate Authentication Material: Web Session Cookie | Session theft hypothesis |
+| Persistence | T1098 Account Manipulation | Delegates, new MFA methods |
+| Collection | T1114.003 Email Forwarding Rule | Forwarding rules that copy mail out |
+| Lateral Movement | T1534 Internal Spearphishing | Mail to staff from trusted accounts |
 | Collection | T1114.002 Remote Email Collection | Mailbox content access |
 
 ---
@@ -211,6 +221,9 @@ AuditLogs
 ## Sources
 
 - The Cyber Express, "Nikkei Cyberattack Hijacks Employee Accounts, Sends 9,000 Spoofed Emails," 5 October 2026: https://thecyberexpress.com/nikkei-cyberattack/
-- Nikkei's own statements, linked from that article (nikkei.co.jp and nikkeibp.co.jp)
+- BleepingComputer, on the Microsoft 365 and Google Workspace incidents, 6 October 2026: https://www.bleepingcomputer.com/news/security/nikkei-discloses-breaches-of-employees-microsoft-google-email-accounts/
+- The Record, on the Microsoft 365 and Google Workspace incidents: https://therecord.media/nikkei-cyberattack-japan-data
+- BleepingComputer, on the development system incident, 19 October 2026: https://www.bleepingcomputer.com/news/security/nikkei-discloses-third-data-breach-in-a-month-18m-records-exposed/
+- Nikkei's own statements, linked from the first article (nikkei.co.jp and nikkeibp.co.jp)
 
 *This document is for education and portfolio use. It uses public reporting only and does not describe any real response or internal data.*
